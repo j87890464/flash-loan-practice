@@ -40,11 +40,12 @@ contract DeployCompoundV2Script is Script, CompoundV2DeploymentStorage {
         deployWhitePaperInterestRateModel();
         deployCErc20Delegate();
         // ERC20 token A
-        deployCTokenA();
+        deployCToken(deployERC20("tokenA", "TA"), "compound tokenA", "cTA");
         addToSupportMarket(cTokens["cTA"]);
         // ERC20 token B
-        deployCTokenB();
+        deployCToken(deployERC20("tokenB", "TB"), "compound tokenB", "cTB");
         addToSupportMarket(cTokens["cTB"]);
+
         vm.stopBroadcast();
 
         return compoundV2Deployment;
@@ -82,42 +83,24 @@ contract DeployCompoundV2Script is Script, CompoundV2DeploymentStorage {
         compoundV2Deployment.cErc20Delegate = addr;
     }
 
-    function deployCTokenA() public returns(address addr) {
-        address tokenA = deployERC20("Token A", "TA");
-        underlyingTokens["cTA"] = tokenA;
-        CErc20Delegator cTokenA = new CErc20Delegator(
-            tokenA,
+    function deployCToken(address _underlyingToken, string memory _name, string memory _symbol) public returns(address addr) {
+        require(compoundV2Deployment.unitroller != address(0) && compoundV2Deployment.interestRateModel != address(0), "unitroller or interestRateModel is not ready.");
+        require(_underlyingToken != address(0), "Invalid underlyingToken address.");
+        underlyingTokens[_symbol] = _underlyingToken;
+        CErc20Delegator cToken = new CErc20Delegator(
+            _underlyingToken,
             Comptroller(compoundV2Deployment.unitroller),
             WhitePaperInterestRateModel(compoundV2Deployment.interestRateModel),
             MANTISSA,
-            "Compound tokenA",
-            "cTA",
+            _name,
+            _symbol,
             DECIMALS,
             compoundV2Deployment.admin,
             compoundV2Deployment.cErc20Delegate,
             bytes("")
         );
-        cTokens["cTA"] = address(cTokenA);
-        addr = address(cTokenA);
-    }
-
-    function deployCTokenB() public returns(address addr) {
-        address tokenB = deployERC20("Token B", "TB");
-        underlyingTokens["cTB"] = tokenB;
-        CErc20Delegator cTokenB = new CErc20Delegator(
-            tokenB,
-            Comptroller(compoundV2Deployment.unitroller),
-            WhitePaperInterestRateModel(compoundV2Deployment.interestRateModel),
-            MANTISSA,
-            "Compound tokenB",
-            "cTB",
-            DECIMALS,
-            compoundV2Deployment.admin,
-            compoundV2Deployment.cErc20Delegate,
-            bytes("")
-        );
-        cTokens["cTB"] = address(cTokenB);
-        addr = address(cTokenB);
+        cTokens[_symbol] = address(cToken);
+        addr = address(cToken);
     }
 
     function deployERC20(string memory _name, string memory _symbol) public returns(address addr) {
