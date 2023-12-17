@@ -11,8 +11,12 @@ import { Unitroller } from "compound-protocol/contracts/Unitroller.sol";
 import { Comptroller } from "compound-protocol/contracts/Comptroller.sol";
 import { SimplePriceOracle } from "compound-protocol/contracts/SimplePriceOracle.sol";
 import { CErc20Delegator } from "compound-protocol/contracts/CErc20Delegator.sol";
+import { AaveFlashLoan } from "../src/AaveFlashLoan.sol";
+import { ISwapRouter } from "v3-periphery/interfaces/ISwapRouter.sol";
 
 contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
+    string MAINNET_RPC_URL = vm.envString("MAINNET_RPC_URL");
+    string SEPOLIA_RPC_URL = vm.envString("SEPOLIA_RPC_URL");
     uint public constant MANTISSA = 18;
     uint public constant protocolSeizeShareMantissa = 2.8e16;
     uint public liquidationIncentive;
@@ -20,6 +24,22 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
     DeployCompoundV2Script public deployCompoundV2;
     address public userA;
     address public userB;
+    address public userC;
+    address public constant UNI_ADDRESS = 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984; // 18
+    address public constant USDC_ADDRESS = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // 6
+    address public constant POOL_ADDRESSES_PROVIDER = 0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e;
+    address public constant UNISWAP_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564; 
+
+    AaveFlashLoan aaveFlashLoan;
+
+    struct LiquidationParams {
+        address loanToken;
+        uint loanAmount;
+        address target;
+        address borrower;
+        uint repayAmount;
+        address collateral;
+    }
 
     event PricePosted(address asset, uint previousPriceMantissa, uint requestedPriceMantissa, uint newPriceMantissa);
     event Mint(address minter, uint mintAmount, uint mintTokens);
@@ -28,12 +48,24 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
     event RepayBorrow(address payer, address borrower, uint repayAmount, uint accountBorrows, uint totalBorrows);
     event LiquidateBorrow(address liquidator, address borrower, uint repayAmount, address cTokenCollateral, uint seizeTokens);
 
+    modifier mainnetFork {
+        uint256 fork = vm.createFork(MAINNET_RPC_URL);
+        vm.selectFork(fork);
+        vm.roll(17465000);
+        _;
+    }
 
-    function setUp() public {
-        deployCompoundV2 = new DeployCompoundV2Script();
-        compoundV2Deployment = deployCompoundV2.run();
+    modifier sepoliaFork {
+        uint256 fork = vm.createFork(SEPOLIA_RPC_URL);
+        vm.selectFork(fork);
+        _;
+    }
+
+    function setUp() mainnetFork public {
+        _deployCompoundV2OnMainnet();
         userA = makeAddr("userA");
         userB = makeAddr("userB");
+        userC = makeAddr("userC");
         vm.label(deployCompoundV2.underlyingTokens("cTA"), "tokenA");
         vm.label(deployCompoundV2.underlyingTokens("cTB"), "tokenB");
         vm.label(deployCompoundV2.cTokens("cTA"), "cTokenA");
@@ -41,7 +73,7 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         vm.label(compoundV2Deployment.admin, "Compound admin");
         closeFactor = 1 * 10 ** MANTISSA;
         _setCloseFactor(closeFactor);
-        liquidationIncentive = 108 * 10 ** (MANTISSA - 2);
+        liquidationIncentive = 108 * 10 ** MANTISSA / 100;
         _setLiquidationIncentive(liquidationIncentive);
     }
 
@@ -53,9 +85,7 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         assertTrue(compoundV2Deployment.comptroller != address(0), "deploy Comptroller failed.");
         assertTrue(compoundV2Deployment.interestRateModel != address(0), "deploy InterestRateModel failed.");
         assertTrue(compoundV2Deployment.cErc20Delegate != address(0), "deploy CErc20Delegate failed.");
-        assertEq(EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).decimals(), 18, "tokenA decimals is incorrect.");
         assertEq(EIP20Interface(deployCompoundV2.cTokens("cTA")).decimals(), 18, "cTokenA decimals is incorrect.");
-        assertEq(EIP20Interface(deployCompoundV2.underlyingTokens("cTB")).decimals(), 18, "tokenB decimals is incorrect.");
         assertEq(EIP20Interface(deployCompoundV2.cTokens("cTB")).decimals(), 18, "cTokenB decimals is incorrect.");
         assertEq(CErc20(deployCompoundV2.cTokens("cTA")).borrowRatePerBlock(), 0, "cTokenA initial borrowRate is incorrect.");
         assertEq(CErc20(deployCompoundV2.cTokens("cTB")).borrowRatePerBlock(), 0, "cTokenB initial borrowRate is incorrect.");
@@ -85,9 +115,10 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         deal(deployCompoundV2.underlyingTokens("cTA"), userA, _mintAmount);
         EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).approve(deployCompoundV2.cTokens("cTA"), _mintAmount);
         vm.expectEmit();
-        emit Mint(userA, _mintAmount, _mintAmount);
+        uint _mintTokens = 100 * 10 ** MANTISSA;
+        emit Mint(userA, _mintAmount, _mintTokens);
         CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).mint(_mintAmount);
-        assertEq(CErc20(deployCompoundV2.cTokens("cTA")).balanceOf(userA), _mintAmount, "mintAmount is incorrect.");
+        assertEq(CErc20(deployCompoundV2.cTokens("cTA")).balanceOf(userA), _mintTokens, "mintTokens is incorrect.");
         vm.stopPrank();
     }
 
@@ -97,10 +128,11 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
     function testMintAndRedeemCTokenA() public {
         testMintCTokenA();
         vm.startPrank(userA);
+        uint _redeemATokens = 100 * 10 ** MANTISSA;
         uint _redeemAmount = 100 * 10 ** EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).decimals();
         vm.expectEmit();
-        emit Redeem(userA, _redeemAmount, _redeemAmount);
-        CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).redeem(_redeemAmount);
+        emit Redeem(userA, _redeemAmount, _redeemATokens);
+        CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).redeem(_redeemATokens);
         assertEq(EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).balanceOf(userA), _redeemAmount, "redeemAmount is incorrect.");     
         vm.stopPrank();
     }
@@ -159,7 +191,7 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
     function testLiquidation_ViaAlterCollateralFactor() public {
         testBorrow();
         CToken _cTB = CToken(deployCompoundV2.cTokens("cTB"));
-        _setCollateralFactor(_cTB, 40 * 10 ** (MANTISSA - 2));
+        _setCollateralFactor(_cTB, 40 * 10 ** MANTISSA / 100);
 
         vm.startPrank(userB);
         uint _repayAmount = 50 * 10 ** MANTISSA;
@@ -201,6 +233,65 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         uint _afterBalance = EIP20Interface(deployCompoundV2.cTokens("cTB")).balanceOf(userB);
         assertEq(_afterBalance - _beforeBalance, _seizeTokens, "seize tokens is incorrect.");
         vm.stopPrank();
+    }
+
+    // Liquidation case3:
+    function testLiquidation_ViaAaveV3() public {
+        // block: 17465000
+        assertEq(block.number, 17_465_000, "incorrect block number.");
+        
+        _setCloseFactor(50 * 10 ** MANTISSA / 100);
+        _setPrice(deployCompoundV2.underlyingTokens("cTA"), 1 * 10 ** (36 - CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals()));
+        _setPrice(deployCompoundV2.underlyingTokens("cTB"), 5 * 10 ** (36 - CErc20(deployCompoundV2.underlyingTokens("cTB")).decimals()));
+        CToken _cTB = CToken(deployCompoundV2.cTokens("cTB"));
+        _setCollateralFactor(_cTB, 50 * 10 ** MANTISSA / 100);
+
+        vm.startPrank(userC);
+        uint _borrowAmount = 2500 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals();
+        deal(deployCompoundV2.underlyingTokens("cTA"), userC, _borrowAmount);
+        EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).approve(deployCompoundV2.cTokens("cTA"), _borrowAmount);
+        CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).mint(_borrowAmount);
+        vm.stopPrank();
+
+        vm.startPrank(userA);
+        uint _mintAmount = 1000 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTB")).decimals();
+        deal(deployCompoundV2.underlyingTokens("cTB"), userA, _mintAmount);
+        EIP20Interface(deployCompoundV2.underlyingTokens("cTB")).approve(deployCompoundV2.cTokens("cTB"), _mintAmount);
+        CErc20Delegator(payable(deployCompoundV2.cTokens("cTB"))).mint(_mintAmount);
+        address[] memory cTokens = new address[](1);
+        cTokens[0] = deployCompoundV2.cTokens("cTB");
+        Comptroller(compoundV2Deployment.unitroller).enterMarkets(cTokens);
+        CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).borrow(_borrowAmount);
+        vm.stopPrank();
+        
+        // UNI price: From 5$ to 4$
+        _setPrice(deployCompoundV2.underlyingTokens("cTB"), 4 * 10 ** (36 - CErc20(deployCompoundV2.underlyingTokens("cTB")).decimals()));
+
+        vm.startPrank(userA);
+        aaveFlashLoan = new AaveFlashLoan(USDC_ADDRESS, UNI_ADDRESS, POOL_ADDRESSES_PROVIDER, UNISWAP_ROUTER);
+        LiquidationParams memory liquidationParams;
+        liquidationParams.loanToken = USDC_ADDRESS;
+        liquidationParams.loanAmount = 1000 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals();
+        liquidationParams.target = deployCompoundV2.cTokens("cTA");
+        liquidationParams.borrower = userA;
+        liquidationParams.repayAmount = 1000 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals();
+        liquidationParams.collateral = deployCompoundV2.cTokens("cTB");
+        
+        aaveFlashLoan.execute(abi.encode(liquidationParams));
+        vm.stopPrank();
+    }
+
+    function _deployCompoundV2OnMainnet() private mainnetFork {
+        _deployCompoundV2();
+    }
+
+    function _deployCompoundV2OnSepolia() private sepoliaFork {
+        _deployCompoundV2();
+    }
+
+    function _deployCompoundV2() private mainnetFork {
+        deployCompoundV2 = new DeployCompoundV2Script();
+        compoundV2Deployment = deployCompoundV2.run();
     }
 
     function _setPrice(address _underlyingToken, uint _price) private {
