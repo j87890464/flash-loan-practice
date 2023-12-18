@@ -61,8 +61,8 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         _;
     }
 
-    function setUp() mainnetFork public {
-        _deployCompoundV2OnMainnet();
+    function setUp() public mainnetFork {
+        _deployCompoundV2();
         userA = makeAddr("userA");
         userB = makeAddr("userB");
         userC = makeAddr("userC");
@@ -71,6 +71,8 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         vm.label(deployCompoundV2.cTokens("cTA"), "cTokenA");
         vm.label(deployCompoundV2.cTokens("cTB"), "cTokenB");
         vm.label(compoundV2Deployment.admin, "Compound admin");
+        vm.label(POOL_ADDRESSES_PROVIDER, "Uniswap pool address provider");
+        vm.label(UNISWAP_ROUTER, "Uniswap router");
         closeFactor = 1 * 10 ** MANTISSA;
         _setCloseFactor(closeFactor);
         liquidationIncentive = 108 * 10 ** MANTISSA / 100;
@@ -237,59 +239,67 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
 
     // Liquidation case3:
     function testLiquidation_ViaAaveV3() public {
-        // block: 17465000
+        // block number: 17465000
         assertEq(block.number, 17_465_000, "incorrect block number.");
         
-        _setCloseFactor(50 * 10 ** MANTISSA / 100);
+        // close factor: 50%
+        // tokenA(USDC) price: 1$
+        // tokenB(UNI) price: 5$
+        // Compound tokenB collateral factor: 50%
+        closeFactor = 50 * 10 ** MANTISSA / 100;
+        _setCloseFactor(closeFactor);
         _setPrice(deployCompoundV2.underlyingTokens("cTA"), 1 * 10 ** (36 - CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals()));
         _setPrice(deployCompoundV2.underlyingTokens("cTB"), 5 * 10 ** (36 - CErc20(deployCompoundV2.underlyingTokens("cTB")).decimals()));
         CToken _cTB = CToken(deployCompoundV2.cTokens("cTB"));
-        _setCollateralFactor(_cTB, 50 * 10 ** MANTISSA / 100);
+        uint _collateralFactor = 50 * 10 ** MANTISSA / 100;
+        _setCollateralFactor(_cTB, _collateralFactor);
 
         vm.startPrank(userC);
         uint _borrowAmount = 2500 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals();
         deal(deployCompoundV2.underlyingTokens("cTA"), userC, _borrowAmount);
         EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).approve(deployCompoundV2.cTokens("cTA"), _borrowAmount);
-        CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).mint(_borrowAmount);
+        (uint _success) = CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).mint(_borrowAmount);
+        require(_success == 0, "mint failed.");
         vm.stopPrank();
 
+        // userA offer 1000 UNI as collateral
         vm.startPrank(userA);
         uint _mintAmount = 1000 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTB")).decimals();
         deal(deployCompoundV2.underlyingTokens("cTB"), userA, _mintAmount);
         EIP20Interface(deployCompoundV2.underlyingTokens("cTB")).approve(deployCompoundV2.cTokens("cTB"), _mintAmount);
-        CErc20Delegator(payable(deployCompoundV2.cTokens("cTB"))).mint(_mintAmount);
+        (_success) = CErc20Delegator(payable(deployCompoundV2.cTokens("cTB"))).mint(_mintAmount);
+        require(_success == 0, "mint failed.");
         address[] memory cTokens = new address[](1);
         cTokens[0] = deployCompoundV2.cTokens("cTB");
-        Comptroller(compoundV2Deployment.unitroller).enterMarkets(cTokens);
+        (uint[] memory _successList) = Comptroller(compoundV2Deployment.unitroller).enterMarkets(cTokens);
+        require(_successList[0] == 0, "enterMarkets failed.");
         CErc20Delegator(payable(deployCompoundV2.cTokens("cTA"))).borrow(_borrowAmount);
         vm.stopPrank();
         
-        // UNI price: From 5$ to 4$
+        // change UNI price: From 5$ to 4$
         _setPrice(deployCompoundV2.underlyingTokens("cTB"), 4 * 10 ** (36 - CErc20(deployCompoundV2.underlyingTokens("cTB")).decimals()));
 
-        vm.startPrank(userA);
+        // userB create and call AaveFlashLoan to liquidate userA's borrow
+        vm.startPrank(userB);
+        uint _beforeBalance = EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).balanceOf(userB);
+        uint _borrowBalance = CToken(deployCompoundV2.cTokens("cTA")).borrowBalanceStored(userA);
+        uint _maxLiquiateAmount = _mulWithMantissa(_borrowBalance, _collateralFactor);
         aaveFlashLoan = new AaveFlashLoan(USDC_ADDRESS, UNI_ADDRESS, POOL_ADDRESSES_PROVIDER, UNISWAP_ROUTER);
         LiquidationParams memory liquidationParams;
         liquidationParams.loanToken = USDC_ADDRESS;
-        liquidationParams.loanAmount = 1000 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals();
+        liquidationParams.loanAmount = _maxLiquiateAmount;
         liquidationParams.target = deployCompoundV2.cTokens("cTA");
         liquidationParams.borrower = userA;
-        liquidationParams.repayAmount = 1000 * 10 ** CErc20(deployCompoundV2.underlyingTokens("cTA")).decimals();
+        liquidationParams.repayAmount = _maxLiquiateAmount;
         liquidationParams.collateral = deployCompoundV2.cTokens("cTB");
-        
         aaveFlashLoan.execute(abi.encode(liquidationParams));
+        aaveFlashLoan.withdraw(deployCompoundV2.underlyingTokens("cTA"));
+        uint _afterBalance = EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).balanceOf(userB);
+        assertGt(_afterBalance - _beforeBalance, 0, "liquidate failed.");
         vm.stopPrank();
     }
 
-    function _deployCompoundV2OnMainnet() private mainnetFork {
-        _deployCompoundV2();
-    }
-
-    function _deployCompoundV2OnSepolia() private sepoliaFork {
-        _deployCompoundV2();
-    }
-
-    function _deployCompoundV2() private mainnetFork {
+    function _deployCompoundV2() private {
         deployCompoundV2 = new DeployCompoundV2Script();
         compoundV2Deployment = deployCompoundV2.run();
     }

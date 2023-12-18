@@ -7,12 +7,19 @@ import { CTokenInterface, CErc20Interface } from "compound-protocol/contracts/CT
 import { ISwapRouter } from "v3-periphery/interfaces/ISwapRouter.sol";
 
 contract AaveFlashLoan is IFlashLoanSimpleReceiver {
+  address public immutable admin;
   address public immutable usdc;
   address public immutable uni;
   address public immutable poolAddressProvider;
   address public immutable uniswapRouter;
 
+  modifier onlyAdmin() {
+    require(msg.sender == admin, "only admin is allowed.");
+    _;
+  }
+
   constructor(address _usdc, address _uni, address _poolAddressProvider, address _uniswapRouter) {
+    admin = msg.sender;
     usdc = _usdc;
     uni = _uni;
     poolAddressProvider = _poolAddressProvider;
@@ -35,14 +42,19 @@ contract AaveFlashLoan is IFlashLoanSimpleReceiver {
     address initiator,
     bytes calldata params
   ) external override returns (bool) {
-    // Compound V2 liquidate
-    // cUNI -> UNI (redeem)
-    // UNI -> USDC (uniswap)
-    // Aave payback USDC (approve)
+    // Compound V2: liquidateBorrow
+    //  - cUNI -> UNI (redeem)
+    // Uniswap: UNI -> USDC (exactInputSingle)
+    // Aave: payback USDC (approve)
+    require(msg.sender == address(POOL()), "sender must from Aave.");
+    require(initiator == address(this), "initiator must be this contract.");
+
     LiquidationParams memory liquidationParams = abi.decode(params, (LiquidationParams));
-    IERC20(liquidationParams.loanToken).approve(liquidationParams.target, liquidationParams.repayAmount);
-    CErc20Interface(payable(liquidationParams.target)).liquidateBorrow(liquidationParams.borrower, liquidationParams.repayAmount, CTokenInterface(liquidationParams.collateral));
-    CErc20Interface(payable(liquidationParams.collateral)).redeem(IERC20(liquidationParams.collateral).balanceOf(address(this)));
+    IERC20(asset).approve(liquidationParams.target, liquidationParams.repayAmount);
+    (uint _success) = CErc20Interface(payable(liquidationParams.target)).liquidateBorrow(liquidationParams.borrower, liquidationParams.repayAmount, CTokenInterface(liquidationParams.collateral));
+    require(_success == 0, "liquidateBorrow failed.");
+    (_success) = CErc20Interface(payable(liquidationParams.collateral)).redeem(IERC20(liquidationParams.collateral).balanceOf(address(this)));
+    require(_success == 0, "redeem failed.");
     IERC20(uni).approve(uniswapRouter, IERC20(uni).balanceOf(address(this)));
     ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
         tokenIn: uni,
@@ -55,7 +67,8 @@ contract AaveFlashLoan is IFlashLoanSimpleReceiver {
         sqrtPriceLimitX96: 0
     });
     uint256 amountOut = ISwapRouter(uniswapRouter).exactInputSingle(swapParams);
-    uint paybackAmount = liquidationParams.loanAmount + premium;
+    uint paybackAmount = amount + premium;
+    require(amountOut >= paybackAmount, "Insufficient amountOut.");
     IERC20(asset).approve(msg.sender, paybackAmount);
 
     return true;
@@ -64,12 +77,12 @@ contract AaveFlashLoan is IFlashLoanSimpleReceiver {
   function execute(bytes memory params) external {
     LiquidationParams memory liquidationParams = abi.decode(params, (LiquidationParams));
     POOL().flashLoanSimple(
-    address(this),
-    usdc,
-    liquidationParams.loanAmount,
-    params,
-    0
-  );
+      address(this),
+      liquidationParams.loanToken,
+      liquidationParams.loanAmount,
+      params,
+      0
+    );
   }
 
   function ADDRESSES_PROVIDER() public view returns (IPoolAddressesProvider) {
@@ -78,5 +91,13 @@ contract AaveFlashLoan is IFlashLoanSimpleReceiver {
 
   function POOL() public view returns (IPool) {
     return IPool(ADDRESSES_PROVIDER().getPool());
+  }
+
+  function withdraw(address token) public onlyAdmin {
+    IERC20(token).transfer(admin, IERC20(token).balanceOf(address(this)));
+  }
+
+  function withdrawEth() public onlyAdmin {
+    payable(admin).call{value: address(this).balance}("");
   }
 }
