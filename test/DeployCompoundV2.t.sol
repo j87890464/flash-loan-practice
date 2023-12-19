@@ -51,7 +51,7 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
     modifier mainnetFork {
         uint256 fork = vm.createFork(MAINNET_RPC_URL);
         vm.selectFork(fork);
-        vm.roll(17465000);
+        vm.rollFork(17_465_000);
         _;
     }
 
@@ -296,6 +296,7 @@ contract DeployCompoundV2Test is Test, CompoundV2DeploymentStorage {
         aaveFlashLoan.withdraw(deployCompoundV2.underlyingTokens("cTA"));
         uint _afterBalance = EIP20Interface(deployCompoundV2.underlyingTokens("cTA")).balanceOf(userB);
         assertGt(_afterBalance - _beforeBalance, 0, "liquidate failed.");
+        console2.log("liquidation profit:", _afterBalance - _beforeBalance);
         vm.stopPrank();
     }
 
