@@ -24,6 +24,8 @@ contract DeployCompoundV2Script is Script, CompoundV2DeploymentStorage {
     Comptroller comptroller;
     mapping(string => address) public cTokens;
     mapping(string => address) public underlyingTokens;
+    address public constant USDC_ADDRESS = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // 6
+    address public constant UNI_ADDRESS = 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984; // 18
 
     function setUp() public {
     }
@@ -31,7 +33,6 @@ contract DeployCompoundV2Script is Script, CompoundV2DeploymentStorage {
     function run() public returns(CompoundV2Deployment memory) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
-        
         vm.startBroadcast(deployerPrivateKey);
         compoundV2Deployment.admin = payable(deployer);
         deploySimplePriceOracle();
@@ -40,14 +41,12 @@ contract DeployCompoundV2Script is Script, CompoundV2DeploymentStorage {
         deployWhitePaperInterestRateModel();
         deployCErc20Delegate();
         // ERC20 token A
-        deployCToken(deployERC20("tokenA", "TA"), "compound tokenA", "cTA");
+        deployCToken(USDC_ADDRESS, "compound tokenA", "cTA");
         addToSupportMarket(cTokens["cTA"]);
         // ERC20 token B
-        deployCToken(deployERC20("tokenB", "TB"), "compound tokenB", "cTB");
+        deployCToken(UNI_ADDRESS, "compound tokenB", "cTB");
         addToSupportMarket(cTokens["cTB"]);
-
         vm.stopBroadcast();
-
         return compoundV2Deployment;
     }
 
@@ -87,11 +86,13 @@ contract DeployCompoundV2Script is Script, CompoundV2DeploymentStorage {
         require(compoundV2Deployment.unitroller != address(0) && compoundV2Deployment.interestRateModel != address(0), "unitroller or interestRateModel is not ready.");
         require(_underlyingToken != address(0), "Invalid underlyingToken address.");
         underlyingTokens[_symbol] = _underlyingToken;
+        uint cTokenDecimal = 18;
+        uint _initialExchangeRateMantissa = 1 * 10 ** (18 + ERC20(_underlyingToken).decimals() - cTokenDecimal);
         CErc20Delegator cToken = new CErc20Delegator(
             _underlyingToken,
             Comptroller(compoundV2Deployment.unitroller),
             WhitePaperInterestRateModel(compoundV2Deployment.interestRateModel),
-            MANTISSA,
+            _initialExchangeRateMantissa,
             _name,
             _symbol,
             DECIMALS,
